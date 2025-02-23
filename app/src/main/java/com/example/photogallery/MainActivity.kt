@@ -198,8 +198,14 @@ fun DraggableSelectionOverlay(
     onDragEnd: () -> Unit,
     gridState: LazyGridState,
     itemBounds: Map<Uri, Rect>, // New parameter
+    fixedItemBounds: MutableMap<Uri, Rect>, // NEW parameter: snapshot of bounds
+
     content: @Composable () -> Unit
 ) {
+    var fixedGlobalDragStart by remember { mutableStateOf<Offset?>(null) }
+    val dragActive = remember { mutableStateOf(false) }
+    var fixedStartIndex by remember { mutableStateOf<Int?>(null) }
+
     // For auto-scroll checks
     val coroutineScope = rememberCoroutineScope()
 
@@ -225,20 +231,21 @@ fun DraggableSelectionOverlay(
      */
     fun calculateRect(start: Offset?, current: Offset?): Rect? {
         if (start == null || current == null) return null
-        val base = lockedOverlayPos ?: overlayPosInRoot
-        val startInRoot = start + base
-        val currentInRoot = current + base
+        // Use fixedGlobalDragStart (if available) as the start point.
+        val startGlobal = fixedGlobalDragStart ?: (start + (lockedOverlayPos ?: overlayPosInRoot))
+        val currentGlobal = current + (lockedOverlayPos ?: overlayPosInRoot)
         return Rect(
             topLeft = Offset(
-                x = min(startInRoot.x, currentInRoot.x),
-                y = min(startInRoot.y, currentInRoot.y)
+                x = min(startGlobal.x, currentGlobal.x),
+                y = min(startGlobal.y, currentGlobal.y)
             ),
             bottomRight = Offset(
-                x = max(startInRoot.x, currentInRoot.x),
-                y = max(startInRoot.y, currentInRoot.y)
+                x = max(startGlobal.x, currentGlobal.x),
+                y = max(startGlobal.y, currentGlobal.y)
             )
         )
     }
+
 
     // Our pointer logic:
     // 1) Wait for the user to put a finger down
@@ -248,6 +255,7 @@ fun DraggableSelectionOverlay(
     val pointerModifier = Modifier.pointerInput(Unit) {
         awaitPointerEventScope {
             while (true) {
+                (fixedItemBounds as MutableMap).clear()  // NEW: Clear the snapshot for a new drag session
                 val down = awaitFirstDown(requireUnconsumed = false)
                 val startTime = System.currentTimeMillis() // Track initial touch time
                 var pointerId = down.id
@@ -279,14 +287,17 @@ fun DraggableSelectionOverlay(
                             // Only allow drag after hold duration
                             if (elapsedTime >= HOLD_DURATION_MS) {
                                 val startRootPos = down.position + overlayPosInRoot
-                                val isValidDrag =
-                                    itemBounds.values.any { it.contains(startRootPos) }
-
+                                val isValidDrag = itemBounds.values.any { it.contains(startRootPos) }
                                 if (isValidDrag) {
                                     lockedOverlayPos = overlayPosInRoot
+                                    fixedGlobalDragStart = down.position + lockedOverlayPos!!
                                     dragStart = down.position
                                     dragCurrent = down.position
                                     isDragging = true
+                                    dragActive.value = true  // NEW: mark drag as active
+                                    // Capture a snapshot of the current item bounds
+                                    fixedItemBounds.clear()
+                                    fixedItemBounds.putAll(itemBounds)
                                 } else {
                                     break
                                 }
@@ -312,6 +323,8 @@ fun DraggableSelectionOverlay(
                     }
                 }
                 if (isDragging) onDragEnd()
+                (fixedItemBounds as MutableMap).clear()  // NEW: Clear snapshot after drag end
+                dragActive.value = false
             }
         }
     }
@@ -320,9 +333,9 @@ fun DraggableSelectionOverlay(
     androidx.compose.foundation.layout.Box(
         modifier = modifier
             .onGloballyPositioned { coords ->
-                // This is updated every layout pass, but we only use it
-                // before a real drag starts OR if we haven't locked.
-                overlayPosInRoot = coords.positionInRoot()
+                if (!dragActive.value) {  // NEW: update only when not dragging
+                    overlayPosInRoot = coords.positionInRoot()
+                }
                 overlaySizePx = coords.size
             }
             // We *don't* pass `PointerEventPass.Initial` or `.Final`:
@@ -367,6 +380,7 @@ fun MediaListScreen(width: Dp) {
     val coroutineScope = rememberCoroutineScope()
 
     val itemBounds = remember { mutableStateMapOf<Uri, Rect>() }
+    val fixedItemBounds = remember { mutableStateMapOf<Uri, Rect>() }
     val gridState = rememberLazyGridState()
 
     // For column count state and preview handling.
@@ -482,9 +496,15 @@ fun MediaListScreen(width: Dp) {
                 onSelectionChange = { selectionRect ->
 
                     // 1) Find all items physically overlapped
-                    val overlappedUris = itemBounds.filter {
-                        selectionRect.overlaps(it.value)
-                    }.keys
+                    // Combine the fixed snapshot with any new items from live itemBounds
+                    val combinedBounds = fixedItemBounds.toMutableMap().apply {
+                        itemBounds.forEach { (uri, bounds) ->
+                            if (!containsKey(uri)) {
+                                put(uri, bounds)
+                            }
+                        }
+                    }
+                    val overlappedUris = combinedBounds.filter { selectionRect.overlaps(it.value) }.keys
 
                     if (overlappedUris.isEmpty()) {
                         // No items physically overlapped
@@ -503,7 +523,8 @@ fun MediaListScreen(width: Dp) {
                 onDragEnd = {
                     // No special action on drag end
                 },
-                itemBounds = itemBounds // Pass itemBounds here
+                itemBounds = itemBounds, // Pass itemBounds here
+                fixedItemBounds = fixedItemBounds // NEW: pass fixed snapshot containe
             ) {
                 // The actual LazyVerticalGrid content
                 LazyVerticalGrid(
