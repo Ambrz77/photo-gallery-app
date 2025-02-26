@@ -14,14 +14,12 @@ import androidx.activity.result.contract.ActivityResultContracts.RequestPermissi
 import androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult
 import androidx.activity.viewModels
 import androidx.annotation.RequiresApi
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -49,7 +47,9 @@ import androidx.compose.material.Scaffold
 import androidx.compose.material.TopAppBar
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountBox
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.rememberScaffoldState
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonColors
@@ -59,34 +59,32 @@ import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.hapticfeedback.HapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.boundsInRoot
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.round
+import androidx.compose.ui.unit.toIntRect
 import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.rememberAsyncImagePainter
 import coil.compose.rememberImagePainter
 import coil3.compose.AsyncImage
 import coil3.request.CachePolicy
@@ -94,7 +92,8 @@ import coil3.request.ImageRequest
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import java.util.concurrent.TimeUnit
 import kotlin.collections.set
 import kotlin.math.max
@@ -172,197 +171,88 @@ fun PermissionRequestScreen(onRequest: () -> Unit) {
 }
 
 
-@Composable
-fun SelectableGridItem(
-    uri: Uri,
-    onItemPositioned: (uri: Uri, bounds: Rect) -> Unit,
-    modifier: Modifier = Modifier,
-    content: @Composable () -> Unit
-) {
-    Box(
-        modifier = modifier
-            .onGloballyPositioned { layoutCoordinates ->
-                // Use boundsInRoot() so that coordinates match the overlay's coordinate system.
-                val bounds = layoutCoordinates.boundsInRoot()
-                onItemPositioned(uri, bounds)
+/**
+ * The new pointer-input modifier for drag selection.
+ * It works on the LazyVerticalGrid by first mapping visible grid items that have
+ * a media-item key (an Int) and then, after a long press, updating the selection
+ * (stored as a set of Int indices) by unioning the range between the initial and current item.
+ */
+fun Modifier.photoGridDragHandler(
+    lazyGridState: LazyGridState,
+    haptics: HapticFeedback,
+    selectedIndices: MutableState<Set<Int>>,
+    autoScrollSpeed: MutableState<Float>,
+    autoScrollThreshold: Float,
+    hadDragMovement: MutableState<Boolean>,
+    suppressClick: MutableState<Boolean>,
+    resetSuppressTrigger: MutableState<Boolean> // New parameter
+) = pointerInput(Unit) {
+    fun LazyGridState.gridItemKeyAtPosition(hitPoint: Offset): Int? =
+        layoutInfo.visibleItemsInfo.find { itemInfo ->
+            // Use the item's size as a rect and check if the hitPoint (adjusted by offset) is within.
+            itemInfo.size.toIntRect().contains(hitPoint.round() - itemInfo.offset)
+        }?.key as? Int
+
+    var initialKey: Int? = null
+    var currentKey: Int? = null
+
+    detectDragGesturesAfterLongPress(
+        onDragStart = { offset ->
+            lazyGridState.gridItemKeyAtPosition(offset)?.let { key ->
+                if (!selectedIndices.value.contains(key)) {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    initialKey = key
+                    currentKey = key
+                    selectedIndices.value += key
+                }
             }
-    ) {
-        content()
-    }
-}
-
-@Composable
-fun DraggableSelectionOverlay(
-    modifier: Modifier = Modifier,
-    onSelectionChange: (Rect) -> Unit,
-    onDragEnd: () -> Unit,
-    gridState: LazyGridState,
-    itemBounds: Map<Uri, Rect>, // New parameter
-    fixedItemBounds: MutableMap<Uri, Rect>, // NEW parameter: snapshot of bounds
-
-    content: @Composable () -> Unit
-) {
-    var fixedGlobalDragStart by remember { mutableStateOf<Offset?>(null) }
-    val dragActive = remember { mutableStateOf(false) }
-    var fixedStartIndex by remember { mutableStateOf<Int?>(null) }
-
-    // For auto-scroll checks
-    val coroutineScope = rememberCoroutineScope()
-
-    // We'll track the overlay's position in root coords
-    var overlayPosInRoot by remember { mutableStateOf(Offset.Zero) }
-    var overlaySizePx by remember { mutableStateOf(IntSize.Zero) }
-
-    // Once we actually "start" a drag, we lock the overlay's position
-    // so it doesn't shift if the user scrolls the list.
-    var lockedOverlayPos by remember { mutableStateOf<Offset?>(null) }
-
-    // The local pointer offset where the drag started, and current pointer
-    var dragStart by remember { mutableStateOf<Offset?>(null) }
-    var dragCurrent by remember { mutableStateOf<Offset?>(null) }
-
-    // A small threshold so we don't interpret tiny accidental moves as a full drag
-    val TOUCH_SLOP = 20f
-    val HOLD_DURATION_MS = 200L // Adjust timing as needed (200 milliseconds)
-
-    /**
-     * Compute a rectangle in "root" coordinates, using the locked overlay offset
-     * (once a drag is recognized) or the current overlay offset (before that).
-     */
-    fun calculateRect(start: Offset?, current: Offset?): Rect? {
-        if (start == null || current == null) return null
-        // Use fixedGlobalDragStart (if available) as the start point.
-        val startGlobal = fixedGlobalDragStart ?: (start + (lockedOverlayPos ?: overlayPosInRoot))
-        val currentGlobal = current + (lockedOverlayPos ?: overlayPosInRoot)
-        return Rect(
-            topLeft = Offset(
-                x = min(startGlobal.x, currentGlobal.x),
-                y = min(startGlobal.y, currentGlobal.y)
-            ),
-            bottomRight = Offset(
-                x = max(startGlobal.x, currentGlobal.x),
-                y = max(startGlobal.y, currentGlobal.y)
-            )
-        )
-    }
-
-
-    // Our pointer logic:
-    // 1) Wait for the user to put a finger down
-    // 2) If they move more than TOUCH_SLOP, we consider it a "drag"
-    // 3) If they never move that far and then lift, it was a simple tap/long-press for the child
-    // Pointer logic with origin check
-    val pointerModifier = Modifier.pointerInput(Unit) {
-        awaitPointerEventScope {
-            while (true) {
-                (fixedItemBounds as MutableMap).clear()  // NEW: Clear the snapshot for a new drag session
-                val down = awaitFirstDown(requireUnconsumed = false)
-                val startTime = System.currentTimeMillis() // Track initial touch time
-                var pointerId = down.id
-                var totalDistance = 0f
-                var isDragging = false
-                dragStart = null
-                dragCurrent = null
-                lockedOverlayPos = null
-
-                while (true) {
-                    val event = awaitPointerEvent(PointerEventPass.Initial)
-                    if (event.changes.any { !it.pressed }) break
-
-                    val change = event.changes.find { it.id == pointerId } ?: event.changes.first()
-                    pointerId = change.id
-                    val move = change.positionChange()
-
-                    if (move != Offset.Zero) {
-                        totalDistance += move.getDistance()
-
-                        if (!isDragging) {
-                            val elapsedTime = System.currentTimeMillis() - startTime
-
-                            // Cancel if moved too quickly (before hold duration)
-                            if (elapsedTime < HOLD_DURATION_MS && totalDistance > TOUCH_SLOP) {
-                                break
-                            }
-
-                            // Only allow drag after hold duration
-                            if (elapsedTime >= HOLD_DURATION_MS) {
-                                val startRootPos = down.position + overlayPosInRoot
-                                val isValidDrag = itemBounds.values.any { it.contains(startRootPos) }
-                                if (isValidDrag) {
-                                    lockedOverlayPos = overlayPosInRoot
-                                    fixedGlobalDragStart = down.position + lockedOverlayPos!!
-                                    dragStart = down.position
-                                    dragCurrent = down.position
-                                    isDragging = true
-                                    dragActive.value = true  // NEW: mark drag as active
-                                    // Capture a snapshot of the current item bounds
-                                    fixedItemBounds.clear()
-                                    fixedItemBounds.putAll(itemBounds)
-                                } else {
-                                    break
-                                }
-                            }
-                        }
-
-                        if (isDragging) {
-                            change.consume()
-                            dragCurrent = dragCurrent?.plus(move)
-                            calculateRect(dragStart, dragCurrent)?.let(onSelectionChange)
-
-                            // Auto-scroll logic
-                            val currY = dragCurrent!!.y
-                            val containerHeight = overlaySizePx.height.toFloat()
-                            when {
-                                currY > containerHeight - 200f ->
-                                    coroutineScope.launch { gridState.scrollBy(25f) }
-
-                                currY < 200f ->
-                                    coroutineScope.launch { gridState.scrollBy(-25f) }
-                            }
-                        }
+        },
+        onDragCancel = {
+            initialKey = null
+            autoScrollSpeed.value = 0f
+            hadDragMovement.value = false
+            resetSuppressTrigger.value = !resetSuppressTrigger.value
+        },
+        onDragEnd = {
+            // If a drag movement happened, then flag to suppress the subsequent click.
+            if (hadDragMovement.value) {
+                suppressClick.value = true
+            }
+            initialKey = null
+            autoScrollSpeed.value = 0f
+            hadDragMovement.value = false
+            // Instead of launch, trigger a state change for resetting suppressClick.
+            resetSuppressTrigger.value = !resetSuppressTrigger.value
+        },
+        onDrag = { change, dragAmount ->
+            // If the movement exceeds a small threshold, mark that we had a drag.
+            if (dragAmount.getDistance() > 4f) {
+                hadDragMovement.value = true
+            }
+            if (initialKey != null) {
+                val distFromBottom =
+                    lazyGridState.layoutInfo.viewportSize.height - change.position.y
+                val distFromTop = change.position.y
+                autoScrollSpeed.value = when {
+                    distFromBottom < autoScrollThreshold -> autoScrollThreshold - distFromBottom
+                    distFromTop < autoScrollThreshold -> -(autoScrollThreshold - distFromTop)
+                    else -> 0f
+                }
+                lazyGridState.gridItemKeyAtPosition(change.position)?.let { key ->
+                    if (currentKey != key) {
+                        val oldMin = min(initialKey!!, currentKey!!)
+                        val oldMax = max(initialKey!!, currentKey!!)
+                        val newMin = min(initialKey!!, key)
+                        val newMax = max(initialKey!!, key)
+                        // Remove the previously selected range and add the new range.
+                        selectedIndices.value =
+                            (selectedIndices.value - (oldMin..oldMax)) + (newMin..newMax)
+                        currentKey = key
                     }
                 }
-                if (isDragging) onDragEnd()
-                (fixedItemBounds as MutableMap).clear()  // NEW: Clear snapshot after drag end
-                dragActive.value = false
             }
         }
-    }
-
-    // Compose UI: A Box that positions the overlay and applies our pointer logic
-    androidx.compose.foundation.layout.Box(
-        modifier = modifier
-            .onGloballyPositioned { coords ->
-                if (!dragActive.value) {  // NEW: update only when not dragging
-                    overlayPosInRoot = coords.positionInRoot()
-                }
-                overlaySizePx = coords.size
-            }
-            // We *don't* pass `PointerEventPass.Initial` or `.Final`:
-            // we let the child see events first. If the child doesn't fully consume them
-            // (i.e. user starts moving), we step in.
-            // If you find that the child *always* consumes them, you can try `PointerEventPass.Final`.
-            .then(pointerModifier)
-    ) {
-        // The grid or child content goes here
-        content()
-
-        // If a drag is in progress, draw the bounding rectangle
-        val rect = calculateRect(dragStart, dragCurrent)
-        if (rect != null) {
-            Canvas(modifier = Modifier.matchParentSize()) {
-                // For drawing, shift the rect by negative the *unlocked* overlayPosInRoot
-                val base = lockedOverlayPos ?: overlayPosInRoot
-                val rectTopLeft = rect.topLeft - base
-                drawRect(
-                    color = Color.Blue.copy(alpha = 0.2f),
-                    topLeft = rectTopLeft,
-                    size = androidx.compose.ui.geometry.Size(rect.width, rect.height),
-                    style = Stroke(width = 2.dp.toPx())
-                )
-            }
-        }
-    }
+    )
 }
 
 
@@ -371,31 +261,58 @@ fun DraggableSelectionOverlay(
 fun MediaListScreen(width: Dp) {
     val context = LocalContext.current
     val viewModel: MainViewModel = viewModel()
-    // Collect the state from the ViewModel
-    val state by viewModel.state.collectAsState()
-    // Collect the selection state
-    val selectedMedia by viewModel.selectedMedia.collectAsState()
-    // Create a state to hold the media list; initially empty.
-    var mediaItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-    val coroutineScope = rememberCoroutineScope()
 
-    val itemBounds = remember { mutableStateMapOf<Uri, Rect>() }
-    val fixedItemBounds = remember { mutableStateMapOf<Uri, Rect>() }
-    val gridState = rememberLazyGridState()
-
-    // For column count state and preview handling.
-    var columns by remember { mutableIntStateOf(3) }
-    var previewUri by remember { mutableStateOf<Uri?>(null) }
-
-    // --- NEW OR CHANGED: We'll build a flattened list of media items
-    // ignoring date headers, so we can find an index for each media item (URI).
-    var uriToIndex by remember { mutableStateOf<Map<Uri, Int>>(emptyMap()) }
-    var indexToUri by remember { mutableStateOf<Map<Int, Uri>>(emptyMap()) }
-
-    // Load the media items as soon as the composable enters composition.
+    // Trigger loading of media items when this composable enters composition.
     LaunchedEffect(Unit) {
         viewModel.loadMediaItems(context)
     }
+
+    // Collect the state from the ViewModel
+    val state by viewModel.state.collectAsState()
+    // We'll use our own selection state (flattened indices) for drag and tap selection.
+    val selectedIndices = remember { mutableStateOf<Set<Int>>(emptySet()) }
+    var previewUri by remember { mutableStateOf<Uri?>(null) }
+    val gridState = rememberLazyGridState()
+    var columns by remember { mutableIntStateOf(3) }
+    val autoScrollSpeed = remember { mutableStateOf(0f) }
+
+    // Auto-scroll effect during drag.
+    LaunchedEffect(autoScrollSpeed.value) {
+        if (autoScrollSpeed.value != 0f) {
+            while (isActive) {
+                gridState.scrollBy(autoScrollSpeed.value)
+                delay(10)
+            }
+        }
+    }
+
+    // Build a flattened mapping (URI ⇄ grid index) for media items.
+    val (uriToIndex, indexToUri) = remember(state) {
+        val tempUriToIndex = mutableMapOf<Uri, Int>()
+        val tempIndexToUri = mutableMapOf<Int, Uri>()
+        var idx = 0
+        (state as? State.Data)?.list?.forEach { galleryItem ->
+            val uri = when (galleryItem) {
+                is GalleryItem.Image -> galleryItem.mediaItem.uri
+                is GalleryItem.Video -> galleryItem.mediaItem.uri
+                else -> null
+            }
+            uri?.let {
+                tempUriToIndex[it] = idx
+                tempIndexToUri[idx] = it
+                idx++
+            }
+        }
+        tempUriToIndex to tempIndexToUri
+    }
+
+    // Sync local selection (indices) to the ViewModel (as URIs).
+    LaunchedEffect(selectedIndices.value) {
+        val selectedUris = selectedIndices.value.mapNotNull { indexToUri[it] }.toSet()
+        viewModel.setSelection(selectedUris)
+    }
+
+    val inSelectionMode = selectedIndices.value.isNotEmpty()
 
     Column {
         if (previewUri != null) {
@@ -413,12 +330,11 @@ fun MediaListScreen(width: Dp) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Top Left: Display selection count with a clear icon if more than one item is selected.
-            if (selectedMedia.isNotEmpty()) {
+            if (inSelectionMode) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // X icon to clear selection.
                     IconButton(
-                        onClick = { viewModel.clearSelection() }
+                        onClick = { selectedIndices.value = emptySet() }
                     ) {
                         Icon(
                             imageVector = Icons.Default.Close,
@@ -428,7 +344,7 @@ fun MediaListScreen(width: Dp) {
                     }
                     Text(
                         fontWeight = FontWeight.Bold,
-                        text = "${selectedMedia.size} selected",
+                        text = "${selectedIndices.value.size} selected",
                         style = MaterialTheme.typography.subtitle1
 
                     )
@@ -458,204 +374,221 @@ fun MediaListScreen(width: Dp) {
             }
         }
 
+        val hadDragMovement = remember { mutableStateOf(false) }
+        val suppressClick = remember { mutableStateOf(false) }
 
-        // We'll get the list of items from your State.Data, ignoring date headers
-        val allMediaItems = remember(state) {
-            val dataList = (state as? State.Data)?.list ?: emptyList()
-            // Extract only the Image/Video items and ignore the Date items.
-            dataList.filter { it is GalleryItem.Image || it is GalleryItem.Video }
+        // In MediaListScreen (or your parent composable)
+        val resetSuppressTrigger = remember { mutableStateOf(false) }
+
+        // Use a LaunchedEffect outside the pointerInput to reset the suppressClick flag
+        LaunchedEffect(resetSuppressTrigger.value) {
+            delay(50)
+            suppressClick.value = false
         }
 
-        // Build the flatten index maps each time the data changes:
-        // E.g. for items [Image(#1), Image(#2), Video(#3), ...] => index 0 -> #1, index 1 -> #2, etc.
-        LaunchedEffect(allMediaItems) {
-            val tempUriToIndex = mutableMapOf<Uri, Int>()
-            val tempIndexToUri = mutableMapOf<Int, Uri>()
-            var idx = 0
-            allMediaItems.forEach { galleryItem ->
-                val uri = when (galleryItem) {
-                    is GalleryItem.Image -> galleryItem.mediaItem.uri
-                    is GalleryItem.Video -> galleryItem.mediaItem.uri
-                    else -> null
-                }
-                uri?.let {
-                    tempUriToIndex[it] = idx
-                    tempIndexToUri[idx] = it
-                    idx++
-                }
-            }
-            uriToIndex = tempUriToIndex
-            indexToUri = tempIndexToUri
-        }
-
-        // Draggable overlay that draws the bounding rectangle
-        AnimatedContent(columns) { cols ->
-            DraggableSelectionOverlay(
-                modifier = Modifier.fillMaxSize(),
-                gridState = gridState,
-                onSelectionChange = { selectionRect ->
-
-                    // 1) Find all items physically overlapped
-                    // Combine the fixed snapshot with any new items from live itemBounds
-                    val combinedBounds = fixedItemBounds.toMutableMap().apply {
-                        itemBounds.forEach { (uri, bounds) ->
-                            if (!containsKey(uri)) {
-                                put(uri, bounds)
-                            }
-                        }
-                    }
-                    val overlappedUris = combinedBounds.filter { selectionRect.overlaps(it.value) }.keys
-
-                    if (overlappedUris.isEmpty()) {
-                        // No items physically overlapped
-                        viewModel.setSelection(emptySet())
-                    } else {
-                        // 2) Among them, find min & max index
-                        val indexes = overlappedUris.mapNotNull { uriToIndex[it] }
-                        val minIndex = indexes.minOrNull() ?: 0
-                        val maxIndex = indexes.maxOrNull() ?: 0
-
-                        // 3) Then select ALL items in that range
-                        val urisInRange = (minIndex..maxIndex).mapNotNull { indexToUri[it] }
-                        viewModel.setSelection(urisInRange.toSet())
+        // The actual LazyVerticalGrid content
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(columns),
+            state = gridState,
+            modifier = Modifier
+                .fillMaxSize()
+                .photoGridDragHandler(
+                    lazyGridState = gridState,
+                    haptics = LocalHapticFeedback.current,
+                    selectedIndices = selectedIndices,
+                    autoScrollSpeed = autoScrollSpeed,
+                    autoScrollThreshold = with(LocalDensity.current) { 40.dp.toPx() },
+                    hadDragMovement = hadDragMovement,
+                    suppressClick = suppressClick,
+                    resetSuppressTrigger = resetSuppressTrigger
+                )
+        ) {
+            items(
+                items = (state as? State.Data)?.list ?: emptyList(),
+                key = { item ->
+                    when (item) {
+                        is GalleryItem.Date -> "date-${item.date}"
+                        is GalleryItem.Image -> uriToIndex[item.mediaItem.uri] ?: -1
+                        is GalleryItem.Video -> uriToIndex[item.mediaItem.uri] ?: -1
+                        else -> -1
                     }
                 },
-                onDragEnd = {
-                    // No special action on drag end
-                },
-                itemBounds = itemBounds, // Pass itemBounds here
-                fixedItemBounds = fixedItemBounds // NEW: pass fixed snapshot containe
-            ) {
-                // The actual LazyVerticalGrid content
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(cols),
-                    state = gridState,
-                ) {
-                    items(
-                        items = (state as? State.Data)?.list ?: emptyList(),
-                        span = { item ->
-                            when (item) {
-                                is GalleryItem.Date -> GridItemSpan(cols)
-                                else -> GridItemSpan(1)
+                span = { item ->
+                    when (item) {
+                        is GalleryItem.Date -> GridItemSpan(columns)
+                        else -> GridItemSpan(1)
+                    }
+                }
+            ) { item ->
+                when (item) {
+                    is GalleryItem.Date -> {
+                        // For date headers, allow tapping to toggle selection for the whole category.
+                        val itemsForCategory = (state as State.Data).list.filter { galleryItem ->
+                            when (galleryItem) {
+                                is GalleryItem.Image -> viewModel.getDateLabel(galleryItem.mediaItem.date) == item.date
+                                is GalleryItem.Video -> viewModel.getDateLabel(galleryItem.mediaItem.date) == item.date
+                                else -> false
+                            }
+                        }.mapNotNull {
+                            when (it) {
+                                is GalleryItem.Image -> uriToIndex[it.mediaItem.uri]
+                                is GalleryItem.Video -> uriToIndex[it.mediaItem.uri]
+                                else -> null
                             }
                         }
-                    ) { item ->
-                        when (item) {
-                            is GalleryItem.Date -> {
-                                // For date headers, determine if all items under this category are selected.
-                                val itemsForCategory =
-                                    (state as State.Data).list.filter { galleryItem ->
-                                        when (galleryItem) {
-                                            is GalleryItem.Image -> viewModel.getDateLabel(
-                                                galleryItem.mediaItem.date
-                                            ) == item.date
+                        val categorySelected = itemsForCategory.isNotEmpty() &&
+                                itemsForCategory.all { selectedIndices.value.contains(it) }
 
-                                            is GalleryItem.Video -> viewModel.getDateLabel(
-                                                galleryItem.mediaItem.date
-                                            ) == item.date
-
-                                            else -> false
-                                        }
-                                    }.mapNotNull {
-                                        when (it) {
-                                            is GalleryItem.Image -> it.mediaItem.uri
-                                            is GalleryItem.Video -> it.mediaItem.uri
-                                            else -> null
-                                        }
+                        // Date header becomes clickable for category selection.
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(if (categorySelected) Color(0xFFBBDEFB) else Color.Transparent)
+                                .clickable {
+                                    if (categorySelected) {
+                                        selectedIndices.value -= itemsForCategory.toSet()
+                                    } else {
+                                        selectedIndices.value =
+                                            selectedIndices.value.union(itemsForCategory.toSet())
                                     }
-                                val categorySelected =
-                                    itemsForCategory.isNotEmpty() && itemsForCategory.all {
-                                        selectedMedia.contains(it)
-                                    }
-
-                                // Date header becomes clickable for category selection.
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(if (categorySelected) Color(0xFFBBDEFB) else Color.Transparent)
-                                        .clickable { viewModel.toggleCategorySelection(item.date) }
-                                        .padding(8.dp)
-                                ) {
-                                    Text(
-                                        text = item.date,
-                                        style = MaterialTheme.typography.h6.copy(fontWeight = FontWeight.Bold)
-                                    )
                                 }
-                            }
+                                .padding(8.dp)
+                        ) {
+                            Text(
+                                text = item.date,
+                                style = MaterialTheme.typography.h6.copy(fontWeight = FontWeight.Bold)
+                            )
+                        }
+                    }
 
-                            is GalleryItem.Image -> {
-                                SelectableGridItem(
-                                    uri = item.mediaItem.uri,
-                                    onItemPositioned = { uri, bounds ->
-                                        itemBounds[uri] = bounds
-                                    },
-                                    modifier = Modifier.padding(4.dp)
-                                ) {
-                                    Box(
-                                        modifier = Modifier.combinedClickable(
-                                            onClick = {
-                                                if (selectedMedia.isEmpty()) {
-                                                    previewUri = item.mediaItem.uri
-                                                } else {
-                                                    viewModel.toggleMediaSelection(item.mediaItem.uri)
-                                                }
-                                            },
-                                            onLongClick = {
-                                                viewModel.toggleMediaSelection(item.mediaItem.uri)
+                    is GalleryItem.Image -> {
+                        val index = uriToIndex[item.mediaItem.uri]
+                        Box(modifier = Modifier.padding(4.dp)) {
+                            Box(
+                                modifier = Modifier.combinedClickable(
+                                    onClick = {
+                                        if (suppressClick.value) {
+                                            return@combinedClickable
+                                        }
+                                        if (!inSelectionMode) {
+                                            previewUri = item.mediaItem.uri
+                                        } else {
+                                            index?.let {
+                                                // Toggle selection.
+                                                selectedIndices.value =
+                                                    if (selectedIndices.value.contains(it))
+                                                        selectedIndices.value - it
+                                                    else
+                                                        selectedIndices.value + it
                                             }
-                                        )
-                                    ) {
-                                        ImageThumbnail(width.div(columns), item.mediaItem.uri)
-                                        if (selectedMedia.contains(item.mediaItem.uri)) {
-                                            Box(
+                                        }
+                                    },
+//                                    onLongClick = {
+//                                        index?.let {
+//                                            if (!inSelectionMode) {
+//                                                selectedIndices.value += it
+//                                            } else {
+//                                                selectedIndices.value = if (selectedIndices.value.contains(it))
+//                                                    selectedIndices.value - it
+//                                                else
+//                                                    selectedIndices.value + it
+//                                            }
+//                                        }
+//                                    }
+                                )
+                            ) {
+                                ImageThumbnail(width.div(columns), item.mediaItem.uri)
+                                if (inSelectionMode) {
+                                    // Display selection indicator at top-left:
+                                    Box(modifier = Modifier.fillMaxSize()) {
+                                        if (index != null && selectedIndices.value.contains(index)) {
+                                            Icon(
+                                                imageVector = Icons.Filled.CheckCircle,
+                                                contentDescription = null,
+//                                                tint = MaterialTheme.colorScheme.primary,
                                                 modifier = Modifier
-                                                    .matchParentSize()
-                                                    .background(Color(0x800000FF))
+                                                    .align(Alignment.TopStart)
+                                                    .padding(4.dp)
+                                            )
+                                        } else {
+                                            Icon(
+                                                imageVector = Icons.Filled.FavoriteBorder,
+                                                contentDescription = null,
+                                                tint = Color.White.copy(alpha = 0.7f),
+                                                modifier = Modifier
+                                                    .align(Alignment.TopStart)
+                                                    .padding(6.dp)
                                             )
                                         }
                                     }
                                 }
                             }
+                        }
+                    }
 
 
-                            is GalleryItem.Video -> {
-                                SelectableGridItem(
-                                    uri = item.mediaItem.uri,
-                                    onItemPositioned = { uri, bounds ->
-                                        itemBounds[uri] = bounds
-                                    },
-                                    modifier = Modifier.padding(4.dp)
-                                ) {
-                                    Box(
-                                        modifier = Modifier.combinedClickable(
-                                            onClick = {
-                                                if (selectedMedia.isEmpty()) {
-                                                    previewUri = item.mediaItem.uri
-                                                } else {
-                                                    viewModel.toggleMediaSelection(item.mediaItem.uri)
-                                                }
-                                            },
-                                            onLongClick = {
-                                                viewModel.toggleMediaSelection(item.mediaItem.uri)
+                    is GalleryItem.Video -> {
+                        val index = uriToIndex[item.mediaItem.uri]
+                        Box(modifier = Modifier.padding(4.dp)) {
+                            Box(
+                                modifier = Modifier.combinedClickable(
+                                    onClick = {
+                                        if (!inSelectionMode) {
+                                            previewUri = item.mediaItem.uri
+                                        } else {
+                                            index?.let {
+                                                selectedIndices.value =
+                                                    if (selectedIndices.value.contains(it))
+                                                        selectedIndices.value - it
+                                                    else
+                                                        selectedIndices.value + it
                                             }
-                                        )
-                                    ) {
-                                        VideoThumbnail(
-                                            width = width.div(columns),
-                                            uri = item.mediaItem.uri,
-                                            duration = item.mediaItem.duration,
-                                        )
-                                        if (selectedMedia.contains(item.mediaItem.uri)) {
-                                            Box(
+                                        }
+                                    },
+                                    onLongClick = {
+                                        index?.let {
+                                            if (!inSelectionMode) {
+                                                selectedIndices.value += it
+                                            } else {
+                                                selectedIndices.value =
+                                                    if (selectedIndices.value.contains(it))
+                                                        selectedIndices.value - it
+                                                    else
+                                                        selectedIndices.value + it
+                                            }
+                                        }
+                                    }
+                                )
+                            ) {
+                                VideoThumbnail(
+                                    width = width.div(columns),
+                                    uri = item.mediaItem.uri,
+                                    duration = item.mediaItem.duration
+                                )
+                                if (inSelectionMode) {
+                                    Box(modifier = Modifier.fillMaxSize()) {
+                                        if (index != null && selectedIndices.value.contains(index)) {
+                                            Icon(
+                                                imageVector = Icons.Filled.CheckCircle,
+                                                contentDescription = null,
+//                                            tint = MaterialTheme.colorScheme.primary,
                                                 modifier = Modifier
-                                                    .matchParentSize()
-                                                    .background(Color(0x800000FF))
+                                                    .align(Alignment.TopStart)
+                                                    .padding(4.dp)
+                                            )
+                                        } else {
+                                            Icon(
+                                                imageVector = Icons.Filled.FavoriteBorder,
+                                                contentDescription = null,
+                                                tint = Color.White.copy(alpha = 0.7f),
+                                                modifier = Modifier
+                                                    .align(Alignment.TopStart)
+                                                    .padding(6.dp)
                                             )
                                         }
                                     }
                                 }
                             }
-
                         }
                     }
                 }
@@ -758,6 +691,198 @@ fun formatDuration(durationMillis: Long): String {
 }
 
 
+//@Composable
+//fun SelectableGridItem(
+//    uri: Uri,
+//    onItemPositioned: (uri: Uri, bounds: Rect) -> Unit,
+//    modifier: Modifier = Modifier,
+//    content: @Composable () -> Unit
+//) {
+//    Box(
+//        modifier = modifier
+//            .onGloballyPositioned { layoutCoordinates ->
+//                // Use boundsInRoot() so that coordinates match the overlay's coordinate system.
+//                val bounds = layoutCoordinates.boundsInRoot()
+//                onItemPositioned(uri, bounds)
+//            }
+//    ) {
+//        content()
+//    }
+//}
+//
+//@Composable
+//fun DraggableSelectionOverlay(
+//    modifier: Modifier = Modifier,
+//    onSelectionChange: (Rect) -> Unit,
+//    onDragEnd: () -> Unit,
+//    gridState: LazyGridState,
+//    itemBounds: Map<Uri, Rect>, // New parameter
+//    fixedItemBounds: MutableMap<Uri, Rect>, // NEW parameter: snapshot of bounds
+//
+//    content: @Composable () -> Unit
+//) {
+//    var fixedGlobalDragStart by remember { mutableStateOf<Offset?>(null) }
+//    val dragActive = remember { mutableStateOf(false) }
+//
+//    // For auto-scroll checks
+//    val coroutineScope = rememberCoroutineScope()
+//
+//    // We'll track the overlay's position in root coords
+//    var overlayPosInRoot by remember { mutableStateOf(Offset.Zero) }
+//    var overlaySizePx by remember { mutableStateOf(IntSize.Zero) }
+//
+//    // Once we actually "start" a drag, we lock the overlay's position
+//    // so it doesn't shift if the user scrolls the list.
+//    var lockedOverlayPos by remember { mutableStateOf<Offset?>(null) }
+//
+//    // The local pointer offset where the drag started, and current pointer
+//    var dragStart by remember { mutableStateOf<Offset?>(null) }
+//    var dragCurrent by remember { mutableStateOf<Offset?>(null) }
+//
+//    // A small threshold so we don't interpret tiny accidental moves as a full drag
+//    val TOUCH_SLOP = 20f
+//    val HOLD_DURATION_MS = 200L // Adjust timing as needed (200 milliseconds)
+//
+//    /**
+//     * Compute a rectangle in "root" coordinates, using the locked overlay offset
+//     * (once a drag is recognized) or the current overlay offset (before that).
+//     */
+//    fun calculateRect(start: Offset?, current: Offset?): Rect? {
+//        if (start == null || current == null) return null
+//        // Use fixedGlobalDragStart (if available) as the start point.
+//        val startGlobal = fixedGlobalDragStart ?: (start + (lockedOverlayPos ?: overlayPosInRoot))
+//        val currentGlobal = current + (lockedOverlayPos ?: overlayPosInRoot)
+//        return Rect(
+//            topLeft = Offset(
+//                x = min(startGlobal.x, currentGlobal.x),
+//                y = min(startGlobal.y, currentGlobal.y)
+//            ),
+//            bottomRight = Offset(
+//                x = max(startGlobal.x, currentGlobal.x),
+//                y = max(startGlobal.y, currentGlobal.y)
+//            )
+//        )
+//    }
+//
+//
+//    // Our pointer logic:
+//    // 1) Wait for the user to put a finger down
+//    // 2) If they move more than TOUCH_SLOP, we consider it a "drag"
+//    // 3) If they never move that far and then lift, it was a simple tap/long-press for the child
+//    // Pointer logic with origin check
+//    val pointerModifier = Modifier.pointerInput(Unit) {
+//        awaitPointerEventScope {
+//            while (true) {
+//                fixedItemBounds.clear()  // NEW: Clear the snapshot for a new drag session
+//                val down = awaitFirstDown(requireUnconsumed = false)
+//                val startTime = System.currentTimeMillis() // Track initial touch time
+//                var pointerId = down.id
+//                var totalDistance = 0f
+//                var isDragging = false
+//                dragStart = null
+//                dragCurrent = null
+//                lockedOverlayPos = null
+//
+//                while (true) {
+//                    val event = awaitPointerEvent(PointerEventPass.Initial)
+//                    if (event.changes.any { !it.pressed }) break
+//
+//                    val change = event.changes.find { it.id == pointerId } ?: event.changes.first()
+//                    pointerId = change.id
+//                    val move = change.positionChange()
+//                    if (move != Offset.Zero) {
+//                        totalDistance += move.getDistance()
+//
+//                        if (!isDragging) {
+//                            val elapsedTime = System.currentTimeMillis() - startTime
+//
+//                            // Cancel if moved too quickly (before hold duration)
+//                            if (elapsedTime < HOLD_DURATION_MS && totalDistance > TOUCH_SLOP) {
+//                                break
+//                            }
+//
+//                            // Only allow drag after hold duration
+//                            if (elapsedTime >= HOLD_DURATION_MS) {
+//                                val startRootPos = down.position + overlayPosInRoot
+//                                val isValidDrag = itemBounds.values.any { it.contains(startRootPos) }
+//                                if (isValidDrag) {
+//                                    lockedOverlayPos = overlayPosInRoot
+//                                    fixedGlobalDragStart = down.position + lockedOverlayPos!!
+//                                    dragStart = down.position
+//                                    dragCurrent = down.position
+//                                    isDragging = true
+//                                    dragActive.value = true  // NEW: mark drag as active
+//                                    // Capture a snapshot of the current item bounds
+//                                    fixedItemBounds.clear()
+//                                    fixedItemBounds.putAll(itemBounds)
+//                                } else {
+//                                    break
+//                                }
+//                            }
+//                        }
+//
+//                        if (isDragging) {
+//                            change.consume()
+//                            dragCurrent = dragCurrent?.plus(move)
+//                            calculateRect(dragStart, dragCurrent)?.let(onSelectionChange)
+//
+//                            // Auto-scroll logic
+//                            val currY = dragCurrent!!.y
+//                            val containerHeight = overlaySizePx.height.toFloat()
+//                            when {
+//                                currY > containerHeight - 200f ->
+//                                    coroutineScope.launch { gridState.scrollBy(50f) }
+//
+//                                currY < 200f ->
+//                                    coroutineScope.launch { gridState.scrollBy(-50f) }
+//                            }
+//                        }
+//                    }
+//                }
+//                if (isDragging) onDragEnd()
+//                (fixedItemBounds as MutableMap).clear()  // NEW: Clear snapshot after drag end
+//                dragActive.value = false
+//            }
+//        }
+//    }
+//
+//    // Compose UI: A Box that positions the overlay and applies our pointer logic
+//    androidx.compose.foundation.layout.Box(
+//        modifier = modifier
+//            .onGloballyPositioned { coords ->
+//                if (!dragActive.value) {  // NEW: update only when not dragging
+//                    overlayPosInRoot = coords.positionInRoot()
+//                }
+//                overlaySizePx = coords.size
+//            }
+//            // We *don't* pass `PointerEventPass.Initial` or `.Final`:
+//            // we let the child see events first. If the child doesn't fully consume them
+//            // (i.e. user starts moving), we step in.
+//            // If you find that the child *always* consumes them, you can try `PointerEventPass.Final`.
+//            .then(pointerModifier)
+//    ) {
+//        // The grid or child content goes here
+//        content()
+//
+//        // If a drag is in progress, draw the bounding rectangle
+//        val rect = calculateRect(dragStart, dragCurrent)
+//        if (rect != null) {
+//            Canvas(modifier = Modifier.matchParentSize()) {
+//                // For drawing, shift the rect by negative the *unlocked* overlayPosInRoot
+//                val base = lockedOverlayPos ?: overlayPosInRoot
+//                val rectTopLeft = rect.topLeft - base
+//                drawRect(
+//                    color = Color.Blue.copy(alpha = 0.2f),
+//                    topLeft = rectTopLeft,
+//                    size = androidx.compose.ui.geometry.Size(rect.width, rect.height),
+//                    style = Stroke(width = 2.dp.toPx())
+//                )
+//            }
+//        }
+//    }
+//}
+
+
 @Composable
 fun CoilImageExample(state: State, onStartClick: () -> Unit) {
     when (state) {
@@ -788,7 +913,7 @@ fun CoilImageExample(state: State, onStartClick: () -> Unit) {
         items(count = 100,
             itemContent = {
                 val image =
-                    rememberImagePainter("https://d3ccuprjuqkp1j.cloudfront.net/Attachments/NewItems/01-Stickers_v2_20201103210707_0.jpg")
+                    rememberAsyncImagePainter("https://d3ccuprjuqkp1j.cloudfront.net/Attachments/NewItems/01-Stickers_v2_20201103210707_0.jpg")
                 Image(
                     painter = image,
                     contentDescription = null,
@@ -865,8 +990,8 @@ fun PhotoPickerScreen() {
 
             imageUri?.let {
                 Image(
-                    painter = rememberImagePainter(
-                        data = it,
+                    painter = rememberAsyncImagePainter(
+                        model = it
 //                        builder = {
 //                            transformations(CircleCropTransformation())
 //                        }

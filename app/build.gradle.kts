@@ -70,6 +70,8 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
     implementation(libs.coil3.coil.compose)
-    implementation (libs.accompanist.permissions)
+    implementation(libs.accompanist.permissions)
     implementation(libs.lifecycle.viewmodel.compose)
+    implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.kotlinx.coroutines.android)
 }

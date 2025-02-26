@@ -78,58 +78,59 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    // Toggle selection for an individual media item
-    fun toggleMediaSelection(uri: Uri) {
-        val current = _selectedMedia.value.toMutableSet()
-        if (current.contains(uri)) {
-            current.remove(uri)
-        } else {
-            current.add(uri)
-        }
-        _selectedMedia.value = current
-    }
-
-    // Toggle selection for a whole category (date label)
-    fun toggleCategorySelection(dateLabel: String) {
-        // Only proceed if state contains data
-        if (_state.value is State.Data) {
-            val currentData = (_state.value as State.Data).list
-            // Filter media items belonging to this category
-            val mediaItemsForCategory = currentData.filter { item ->
-                when (item) {
-                    is GalleryItem.Image -> getDateLabel(item.mediaItem.date) == dateLabel
-                    is GalleryItem.Video -> getDateLabel(item.mediaItem.date) == dateLabel
-                    else -> false
-                }
-            }.map {
-                when (it) {
-                    is GalleryItem.Image -> it.mediaItem.uri
-                    is GalleryItem.Video -> it.mediaItem.uri
-                    else -> null
-                }
-            }.filterNotNull()
-
-            val currentSelected = _selectedMedia.value.toMutableSet()
-            // Determine if all items in the category are already selected
-            val allSelected = mediaItemsForCategory.all { currentSelected.contains(it) }
-            if (allSelected) {
-                // Deselect all items in this category
-                mediaItemsForCategory.forEach { currentSelected.remove(it) }
-            } else {
-                // Select all items not already selected
-                mediaItemsForCategory.forEach { currentSelected.add(it) }
-            }
-            _selectedMedia.value = currentSelected
-        }
-    }
-
-    fun clearSelection() {
-        _selectedMedia.value = emptySet()
-    }
-
     fun setSelection(newSelection: Set<Uri>) {
         _selectedMedia.value = newSelection
     }
+
+//    // Toggle selection for an individual media item
+//    fun toggleMediaSelection(uri: Uri) {
+//        val current = _selectedMedia.value.toMutableSet()
+//        if (current.contains(uri)) {
+//            current.remove(uri)
+//        } else {
+//            current.add(uri)
+//        }
+//        _selectedMedia.value = current
+//    }
+//
+//    // Toggle selection for a whole category (date label)
+//    fun toggleCategorySelection(dateLabel: String) {
+//        // Only proceed if state contains data
+//        if (_state.value is State.Data) {
+//            val currentData = (_state.value as State.Data).list
+//            // Filter media items belonging to this category
+//            val mediaItemsForCategory = currentData.filter { item ->
+//                when (item) {
+//                    is GalleryItem.Image -> getDateLabel(item.mediaItem.date) == dateLabel
+//                    is GalleryItem.Video -> getDateLabel(item.mediaItem.date) == dateLabel
+//                    else -> false
+//                }
+//            }.map {
+//                when (it) {
+//                    is GalleryItem.Image -> it.mediaItem.uri
+//                    is GalleryItem.Video -> it.mediaItem.uri
+//                    else -> null
+//                }
+//            }.filterNotNull()
+//
+//            val currentSelected = _selectedMedia.value.toMutableSet()
+//            // Determine if all items in the category are already selected
+//            val allSelected = mediaItemsForCategory.all { currentSelected.contains(it) }
+//            if (allSelected) {
+//                // Deselect all items in this category
+//                mediaItemsForCategory.forEach { currentSelected.remove(it) }
+//            } else {
+//                // Select all items not already selected
+//                mediaItemsForCategory.forEach { currentSelected.add(it) }
+//            }
+//            _selectedMedia.value = currentSelected
+//        }
+//    }
+//
+//    fun clearSelection() {
+//        _selectedMedia.value = emptySet()
+//    }
+
 }
 
 sealed interface State {
