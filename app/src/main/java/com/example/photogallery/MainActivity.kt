@@ -534,10 +534,14 @@ fun MediaListScreen(width: Dp) {
                             Box(
                                 modifier = Modifier.combinedClickable(
                                     onClick = {
+                                        if (suppressClick.value) {
+                                            return@combinedClickable
+                                        }
                                         if (!inSelectionMode) {
                                             previewUri = item.mediaItem.uri
                                         } else {
                                             index?.let {
+                                                // Toggle selection.
                                                 selectedIndices.value =
                                                     if (selectedIndices.value.contains(it))
                                                         selectedIndices.value - it
@@ -546,19 +550,19 @@ fun MediaListScreen(width: Dp) {
                                             }
                                         }
                                     },
-                                    onLongClick = {
-                                        index?.let {
-                                            if (!inSelectionMode) {
-                                                selectedIndices.value += it
-                                            } else {
-                                                selectedIndices.value =
-                                                    if (selectedIndices.value.contains(it))
-                                                        selectedIndices.value - it
-                                                    else
-                                                        selectedIndices.value + it
-                                            }
-                                        }
-                                    }
+//                                    onLongClick = {
+//                                        index?.let {
+//                                            if (!inSelectionMode) {
+//                                                selectedIndices.value += it
+//                                            } else {
+//                                                selectedIndices.value =
+//                                                    if (selectedIndices.value.contains(it))
+//                                                        selectedIndices.value - it
+//                                                    else
+//                                                        selectedIndices.value + it
+//                                            }
+//                                        }
+//                                    }
                                 )
                             ) {
                                 VideoThumbnail(
