@@ -3,10 +3,12 @@ package com.example.photogallery
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.CancellationSignal
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -410,7 +412,6 @@ fun MediaListScreen(width: Dp) {
                         is GalleryItem.Date -> "date-${item.date}"
                         is GalleryItem.Image -> uriToIndex[item.mediaItem.uri] ?: -1
                         is GalleryItem.Video -> uriToIndex[item.mediaItem.uri] ?: -1
-                        else -> -1
                     }
                 },
                 span = { item ->
@@ -646,9 +647,17 @@ fun ImageThumbnail(
             .memoryCacheKey(uri.toString())
             .coroutineContext(Dispatchers.Default)
             .data(
-                LocalContext.current.contentResolver.loadThumbnail(
-                    uri, android.util.Size(250, 250), cancellationSignal,
-                )
+                runCatching {
+                    LocalContext.current.contentResolver.loadThumbnail(
+                        uri,
+                        android.util.Size(250, 250),
+                        cancellationSignal,
+                    )
+                }.getOrElse { throwable ->
+                    Log.e("ImageThumbnail", "Error loading thumbnail for $uri: ${throwable.message}")
+                    // Fallback: return a default bitmap (make sure you have this drawable resource)
+                    BitmapFactory.decodeResource(LocalContext.current.resources, R.drawable.ic_launcher_foreground)
+                }
             )
             .diskCachePolicy(CachePolicy.ENABLED)
             .build(),
