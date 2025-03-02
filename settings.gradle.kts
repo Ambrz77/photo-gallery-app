@@ -21,3 +21,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Photo Gallery"
 include(":app")
+include(":photogallery")

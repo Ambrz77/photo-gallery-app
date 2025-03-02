@@ -1,4 +1,4 @@
-package com.example.photogallery
+package ir.sharif.android.photogallery
 
 import android.Manifest
 import android.app.Activity
@@ -100,25 +100,6 @@ import java.util.concurrent.TimeUnit
 import kotlin.collections.set
 import kotlin.math.max
 import kotlin.math.min
-
-
-class MainActivity : ComponentActivity() {
-    private val viewModel by viewModels<MainViewModel>()
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContent {
-//            CoilImageExample(viewModel.state.collectAsStateWithLifecycle().value) {
-//                viewModel.loadDate()
-//            }
-//            PhotoPickerScreen()
-            MediaApp()
-        }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-    }
-}
 
 
 @OptIn(ExperimentalPermissionsApi::class)
@@ -660,7 +641,7 @@ fun ImageThumbnail(
                 }.getOrElse { throwable ->
                     Log.e("ImageThumbnail", "Error loading thumbnail for $uri: ${throwable.message}")
                     // Fallback: return a default bitmap (make sure you have this drawable resource)
-                    BitmapFactory.decodeResource(LocalContext.current.resources, R.drawable.ic_launcher_foreground)
+//                    BitmapFactory.decodeResource(LocalContext.current.resources, R.drawable.ic_launcher_foreground)
                 }
             )
             .diskCachePolicy(CachePolicy.ENABLED)

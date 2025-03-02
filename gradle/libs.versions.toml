@@ -1,6 +1,6 @@
 [versions]
 accompanistPermissions = "0.18.0"
-activityComposeVersion = "1.10.0"
+activityComposeVersion = "1.10.1"
 agp = "8.8.2"
 coilCompose = "2.7.0"
 coilNetworkOkhttp = "3.0.4"
@@ -12,7 +12,7 @@ espressoCore = "3.6.1"
 kotlinxCoroutinesAndroid = "1.10.1"
 kotlinxCoroutinesCore = "1.10.1"
 lifecycleRuntimeKtx = "2.8.7"
-activityCompose = "1.10.0"
+activityCompose = "1.10.1"
 composeBom = "2025.02.00"
 lifecycleRuntimeKtxVersion = "2.8.7"
 lifecycleViewmodelCompose = "2.8.7"
@@ -20,6 +20,8 @@ material = "1.7.8"
 ui = "1.7.8"
 uiToolingPreview = "1.7.8"
 accompanist = "0.19.0"
+appcompat = "1.7.0"
+materialVersion = "1.12.0"
 
 [libraries]
 accompanist-permissions = { module = "com.google.accompanist:accompanist-permissions", version.ref = "accompanistPermissions" }
@@ -50,9 +52,12 @@ ui = { module = "androidx.compose.ui:ui", version.ref = "ui" }
 ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview", version.ref = "uiToolingPreview" }
 
 accompanist-glide = { group = "com.google.accompanist", name = "accompanist-glide", version.ref = "accompanist" }
+androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+material = { group = "com.google.android.material", name = "material", version.ref = "materialVersion" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+android-library = { id = "com.android.library", version.ref = "agp" }
 
